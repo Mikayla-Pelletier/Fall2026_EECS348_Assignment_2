@@ -1,0 +1,882 @@
+// Include the standard input/output library for functions such as printf(), fprintf(), fopen(), and fclose().
+#include <stdio.h>
+
+// Include the standard library for functions such as malloc(), realloc(), free(), and EXIT_SUCCESS/EXIT_FAILURE.
+#include <stdlib.h>
+
+// Include the string library for functions such as strcmp(), strcpy(), strlen(), strchr(), strrchr(), and strcspn().
+#include <string.h>
+
+// Include the character library for functions such as isspace().
+#include <ctype.h>
+
+
+// ============================================================
+// CONSTANT DEFINITIONS
+// ============================================================
+
+// Maximum number of characters allowed for a sender category, including the terminating '\0'.
+#define SENDER_SIZE 32
+
+// Maximum number of characters allowed for an email subject, including the terminating '\0'.
+#define SUBJECT_SIZE 1024
+
+// Maximum number of characters allowed for a date in MM-DD-YYYY format, including the terminating '\0'.
+#define DATE_SIZE 11
+
+// Maximum length of one input line, including the terminating '\0'.
+#define LINE_SIZE 2048
+
+// Initial number of Email records that the dynamically allocated heap can store.
+#define INITIAL_CAPACITY 8
+
+
+// ============================================================
+// EMAIL STRUCTURE
+// ============================================================
+
+// Define a structure representing one email stored in the priority queue.
+typedef struct
+{
+    // Store the sender category, such as "Boss" or "Peer".
+    char sender[SENDER_SIZE];
+
+    // Store the email subject.
+    char subject[SUBJECT_SIZE];
+
+    // Store the date as a string in MM-DD-YYYY format.
+    char date[DATE_SIZE];
+
+    // Store the numerical priority of the sender category.
+    int sender_priority;
+
+    // Store the numerical representation of the date so newer dates have larger values.
+    int date_priority;
+
+    // Store the order in which the email was received so ties can be resolved deterministically.
+    unsigned long arrival_order;
+
+} Email;
+
+
+// ============================================================
+// MAX HEAP STRUCTURE
+// ============================================================
+
+// Define a max heap using a dynamically growing array.
+typedef struct
+{
+    // Pointer to the dynamically allocated array containing the emails.
+    Email *list;
+
+    // Number of emails currently stored in the heap.
+    size_t size;
+
+    // Number of Email elements that can currently fit in the allocated array.
+    size_t capacity;
+
+} MaxHeap;
+
+
+// ============================================================
+// HEAP INITIALIZATION AND CLEANUP
+// ============================================================
+
+// Initialize an empty heap.
+static void initializeHeap(MaxHeap *heap)
+{
+    // Start with no allocated array because the heap initially contains no emails.
+    heap->list = NULL;
+
+    // Set the current number of emails to zero.
+    heap->size = 0;
+
+    // Set the initial capacity to zero because no memory has been allocated yet.
+    heap->capacity = 0;
+}
+
+
+// Free all dynamically allocated memory belonging to the heap.
+static void destroyHeap(MaxHeap *heap)
+{
+    // Release the dynamically allocated array.
+    free(heap->list);
+
+    // Set the pointer to NULL so it no longer points to freed memory.
+    heap->list = NULL;
+
+    // Reset the size to zero because the heap no longer contains any emails.
+    heap->size = 0;
+
+    // Reset the capacity to zero because no array is allocated anymore.
+    heap->capacity = 0;
+}
+
+
+// ============================================================
+// STRING TRIMMING
+// ============================================================
+
+// Remove whitespace from the beginning and end of a string.
+static void trimWhitespace(char *text)
+{
+    // Create a pointer that will eventually point to the first non-whitespace character.
+    char *start = text;
+
+    // Move the pointer forward while the current character is whitespace.
+    while (*start != '\0' && isspace((unsigned char)*start))
+    {
+        // Advance to the next character.
+        start++;
+    }
+
+    // If leading whitespace was found, move the remaining string to the beginning.
+    if (start != text)
+    {
+        // Move the remaining characters, including the terminating '\0', to the beginning.
+        memmove(text, start, strlen(start) + 1);
+    }
+
+    // Find the current length of the string after removing leading whitespace.
+    size_t length = strlen(text);
+
+    // Continue while the last character is whitespace.
+    while (length > 0 && isspace((unsigned char)text[length - 1]))
+    {
+        // Replace the trailing whitespace character with the string terminator.
+        text[length - 1] = '\0';
+
+        // Reduce the recorded length by one.
+        length--;
+    }
+}
+
+
+// ============================================================
+// SENDER PRIORITY
+// ============================================================
+
+// Convert a sender category into the numerical priority required by the assignment.
+static int getSenderPriority(const char *sender)
+{
+    // A message from the Boss has the highest priority.
+    if (strcmp(sender, "Boss") == 0)
+    {
+        // Return priority level five for the Boss.
+        return 5;
+    }
+
+    // A message from a Subordinate has the second-highest priority.
+    if (strcmp(sender, "Subordinate") == 0)
+    {
+        // Return priority level four for a Subordinate.
+        return 4;
+    }
+
+    // A message from a Peer has the third-highest priority.
+    if (strcmp(sender, "Peer") == 0)
+    {
+        // Return priority level three for a Peer.
+        return 3;
+    }
+
+    // A message from an ImportantPerson has the fourth-highest priority.
+    if (strcmp(sender, "ImportantPerson") == 0)
+    {
+        // Return priority level two for an ImportantPerson.
+        return 2;
+    }
+
+    // A message from an OtherPerson has the lowest valid priority.
+    if (strcmp(sender, "OtherPerson") == 0)
+    {
+        // Return priority level one for an OtherPerson.
+        return 1;
+    }
+
+    // Return zero when the sender category is not recognized.
+    return 0;
+}
+
+
+// ============================================================
+// DATE VALIDATION AND CONVERSION
+// ============================================================
+
+// Convert a date in MM-DD-YYYY format into YYYYMMDD and verify that it represents a valid calendar date.
+static int getDatePriority(const char *date)
+{
+    // Declare an integer to hold the month portion of the date.
+    int month;
+
+    // Declare an integer to hold the day portion of the date.
+    int day;
+
+    // Declare an integer to hold the year portion of the date.
+    int year;
+
+    // Attempt to read the date using the expected MM-DD-YYYY format.
+    if (sscanf(date, "%d-%d-%d", &month, &day, &year) != 3)
+    {
+        // Return zero when the date cannot be parsed.
+        return 0;
+    }
+
+    // Reject years that are not four-digit positive years.
+    if (year < 1000 || year > 9999)
+    {
+        // Return zero because the year is outside the expected range.
+        return 0;
+    }
+
+    // Reject months outside the valid range of 1 through 12.
+    if (month < 1 || month > 12)
+    {
+        // Return zero because the month is invalid.
+        return 0;
+    }
+
+    // Reject days smaller than one.
+    if (day < 1)
+    {
+        // Return zero because the day is invalid.
+        return 0;
+    }
+
+    // Check whether the selected month has 31 days.
+    if (month == 1 || month == 3 || month == 5 || month == 7 ||
+        month == 8 || month == 10 || month == 12)
+    {
+        // Reject a day larger than 31.
+        if (day > 31)
+        {
+            // Return zero because the day does not exist in this month.
+            return 0;
+        }
+    }
+
+    // Check whether the selected month has 30 days.
+    else if (month == 4 || month == 6 || month == 9 || month == 11)
+    {
+        // Reject a day larger than 30.
+        if (day > 30)
+        {
+            // Return zero because the day does not exist in this month.
+            return 0;
+        }
+    }
+
+    // February requires a special leap-year calculation.
+    else
+    {
+        // Determine whether the year is a leap year.
+        int leapYear = (year % 400 == 0) ||
+                       ((year % 4 == 0) && (year % 100 != 0));
+
+        // Set the maximum number of days February can contain.
+        int maximumDay = leapYear ? 29 : 28;
+
+        // Reject a February day that exceeds the correct maximum.
+        if (day > maximumDay)
+        {
+            // Return zero because the date is invalid.
+            return 0;
+        }
+    }
+
+    // Convert MM-DD-YYYY into YYYYMMDD so numerical comparison places newer dates first.
+    return year * 10000 + month * 100 + day;
+}
+
+
+// ============================================================
+// PRIORITY COMPARISON
+// ============================================================
+
+// Determine whether email 'a' should appear before email 'b' in the max heap.
+static int hasHigherPriority(const Email *a, const Email *b)
+{
+    // First compare the sender categories because sender priority is the primary rule.
+    if (a->sender_priority != b->sender_priority)
+    {
+        // The email with the larger sender priority wins.
+        return a->sender_priority > b->sender_priority;
+    }
+
+    // If the sender categories are equal, compare the dates.
+    if (a->date_priority != b->date_priority)
+    {
+        // The email with the newer date has the larger YYYYMMDD value and therefore wins.
+        return a->date_priority > b->date_priority;
+    }
+
+    // If both sender and date are equal, use arrival order as a deterministic tie-breaker.
+    return a->arrival_order < b->arrival_order;
+}
+
+
+// ============================================================
+// HEAP MEMORY GROWTH
+// ============================================================
+
+// Increase the heap's capacity when the existing array becomes full.
+static int growHeap(MaxHeap *heap)
+{
+    // If the heap has no allocated capacity, begin with the initial capacity.
+    size_t new_capacity = (heap->capacity == 0)
+                          ? INITIAL_CAPACITY
+                          : heap->capacity * 2;
+
+    // Attempt to resize the existing array to the new capacity.
+    Email *new_list = realloc(heap->list, new_capacity * sizeof(Email));
+
+    // Check whether the memory allocation failed.
+    if (new_list == NULL)
+    {
+        // Return zero so the caller can handle the allocation failure.
+        return 0;
+    }
+
+    // Store the newly allocated memory address in the heap.
+    heap->list = new_list;
+
+    // Store the new capacity.
+    heap->capacity = new_capacity;
+
+    // Return one to indicate that the resize succeeded.
+    return 1;
+}
+
+
+// ============================================================
+// SWAPPING EMAILS
+// ============================================================
+
+// Exchange the contents of two Email structures.
+static void swapEmails(Email *a, Email *b)
+{
+    // Create a temporary Email structure to hold one email during the swap.
+    Email temporary = *a;
+
+    // Copy the second email into the first email's position.
+    *a = *b;
+
+    // Copy the original first email from the temporary variable into the second position.
+    *b = temporary;
+}
+
+
+// ============================================================
+// HEAPIFY UP
+// ============================================================
+
+// Restore max-heap order after inserting an email at the end of the array.
+static void heapifyUp(MaxHeap *heap, size_t index)
+{
+    // Continue while the current element has a parent.
+    while (index > 0)
+    {
+        // Calculate the index of the current element's parent in a binary heap.
+        size_t parent = (index - 1) / 2;
+
+        // Stop if the current element does not have higher priority than its parent.
+        if (!hasHigherPriority(&heap->list[index], &heap->list[parent]))
+        {
+            // The heap property is already satisfied.
+            break;
+        }
+
+        // Swap the current email with its parent because the current email has higher priority.
+        swapEmails(&heap->list[index], &heap->list[parent]);
+
+        // Continue checking from the parent's new position.
+        index = parent;
+    }
+}
+
+
+// ============================================================
+// HEAPIFY DOWN
+// ============================================================
+
+// Restore max-heap order after removing the root email.
+static void heapifyDown(MaxHeap *heap, size_t index)
+{
+    // Continue until the email reaches a position where the heap property is satisfied.
+    while (1)
+    {
+        // Calculate the index of the current node's left child.
+        size_t left = 2 * index + 1;
+
+        // Calculate the index of the current node's right child.
+        size_t right = 2 * index + 2;
+
+        // Initially assume that the current node has the highest priority.
+        size_t largest = index;
+
+        // Check whether the left child exists and has higher priority than the current largest.
+        if (left < heap->size &&
+            hasHigherPriority(&heap->list[left], &heap->list[largest]))
+        {
+            // Make the left child the current highest-priority candidate.
+            largest = left;
+        }
+
+        // Check whether the right child exists and has higher priority than the current largest.
+        if (right < heap->size &&
+            hasHigherPriority(&heap->list[right], &heap->list[largest]))
+        {
+            // Make the right child the current highest-priority candidate.
+            largest = right;
+        }
+
+        // If the current node is still the largest, the heap property has been restored.
+        if (largest == index)
+        {
+            // Stop because no further movement is necessary.
+            break;
+        }
+
+        // Move the higher-priority child into the current node's position.
+        swapEmails(&heap->list[index], &heap->list[largest]);
+
+        // Continue heapifying from the child's previous position.
+        index = largest;
+    }
+}
+
+
+// ============================================================
+// INSERT EMAIL
+// ============================================================
+
+// Insert one email into the max heap.
+static int insertEmail(MaxHeap *heap, Email email)
+{
+    // Check whether the current array is completely full.
+    if (heap->size == heap->capacity)
+    {
+        // Attempt to double the array's capacity.
+        if (!growHeap(heap))
+        {
+            // Return zero if the array could not be expanded.
+            return 0;
+        }
+    }
+
+    // Place the new email at the next available position in the array.
+    heap->list[heap->size] = email;
+
+    // Restore heap order by moving the new email upward as necessary.
+    heapifyUp(heap, heap->size);
+
+    // Increase the number of emails stored in the heap.
+    heap->size++;
+
+    // Return one to indicate successful insertion.
+    return 1;
+}
+
+
+// ============================================================
+// PEEK / NEXT
+// ============================================================
+
+// Return a pointer to the highest-priority email without removing it.
+static const Email *peekMax(const MaxHeap *heap)
+{
+    // Check whether the heap is empty.
+    if (heap->size == 0)
+    {
+        // Return NULL when there is no email to return.
+        return NULL;
+    }
+
+    // The root of a max heap always contains the highest-priority email.
+    return &heap->list[0];
+}
+
+
+// ============================================================
+// REMOVE MAX / READ
+// ============================================================
+
+// Remove the highest-priority email from the heap.
+static int removeMax(MaxHeap *heap)
+{
+    // Check whether the heap is empty.
+    if (heap->size == 0)
+    {
+        // Return zero because there is nothing to remove.
+        return 0;
+    }
+
+    // Decrease the logical size so the final element becomes outside the active heap.
+    heap->size--;
+
+    // Only replace and heapify the root if an email remains.
+    if (heap->size > 0)
+    {
+        // Move the last email into the root position.
+        heap->list[0] = heap->list[heap->size];
+
+        // Restore max-heap order by moving the replacement email downward.
+        heapifyDown(heap, 0);
+    }
+
+    // Return one to indicate that an email was successfully removed.
+    return 1;
+}
+
+
+// ============================================================
+// INPUT CLEANUP
+// ============================================================
+
+// Remove the newline or carriage-return characters produced by fgets().
+static void removeLineEnding(char *text)
+{
+    // Find the first newline or carriage-return character and replace it with '\0'.
+    text[strcspn(text, "\r\n")] = '\0';
+}
+
+
+// ============================================================
+// EMAIL PARSING
+// ============================================================
+
+// Parse an EMAIL command and populate an Email structure.
+static int parseEmailLine(char *line, Email *email, unsigned long arrival_order)
+{
+    // Declare a pointer that will point to the sender field.
+    char *sender;
+
+    // Declare a pointer that will point to the subject field.
+    char *subject;
+
+    // Declare a pointer that will point to the date field.
+    char *date;
+
+    // Confirm that the line begins with the required "EMAIL " command.
+    if (strncmp(line, "EMAIL ", 6) != 0)
+    {
+        // Return zero because this is not a valid EMAIL command.
+        return 0;
+    }
+
+    // Skip the six characters in "EMAIL " to reach the sender category.
+    sender = line + 6;
+
+    // Find the comma separating the sender from the subject.
+    subject = strchr(sender, ',');
+
+    // Check whether the sender-subject separator was found.
+    if (subject == NULL)
+    {
+        // Return zero because the email line is malformed.
+        return 0;
+    }
+
+    // Replace the comma with '\0' so sender becomes its own string.
+    *subject = '\0';
+
+    // Move the subject pointer to the first character of the subject.
+    subject++;
+
+    // Find the final comma separating the subject from the date.
+    date = strrchr(subject, ',');
+
+    // Check whether the subject-date separator was found.
+    if (date == NULL)
+    {
+        // Return zero because the email line is malformed.
+        return 0;
+    }
+
+    // Replace the comma with '\0' so subject becomes its own string.
+    *date = '\0';
+
+    // Move the date pointer to the first character of the date.
+    date++;
+
+    // Remove any newline or carriage-return characters from the date.
+    removeLineEnding(date);
+
+    // Remove leading and trailing whitespace from the sender.
+    trimWhitespace(sender);
+
+    // Remove leading and trailing whitespace from the subject.
+    trimWhitespace(subject);
+
+    // Remove leading and trailing whitespace from the date.
+    trimWhitespace(date);
+
+    // Check that the sender fits inside the destination array.
+    if (strlen(sender) >= SENDER_SIZE)
+    {
+        // Return zero because copying the sender would overflow the destination.
+        return 0;
+    }
+
+    // Check that the subject fits inside the destination array.
+    if (strlen(subject) >= SUBJECT_SIZE)
+    {
+        // Return zero because copying the subject would overflow the destination.
+        return 0;
+    }
+
+    // Check that the date fits inside the destination array.
+    if (strlen(date) >= DATE_SIZE)
+    {
+        // Return zero because copying the date would overflow the destination.
+        return 0;
+    }
+
+    // Copy the sender into the Email structure.
+    strcpy(email->sender, sender);
+
+    // Copy the subject into the Email structure.
+    strcpy(email->subject, subject);
+
+    // Copy the date into the Email structure.
+    strcpy(email->date, date);
+
+    // Determine the sender's priority category.
+    email->sender_priority = getSenderPriority(sender);
+
+    // Determine the numerical priority of the date.
+    email->date_priority = getDatePriority(date);
+
+    // Save the order in which this email was encountered.
+    email->arrival_order = arrival_order;
+
+    // Reject the email if the sender category was not recognized.
+    if (email->sender_priority == 0)
+    {
+        // Return zero to indicate invalid input.
+        return 0;
+    }
+
+    // Reject the email if the date was not valid.
+    if (email->date_priority == 0)
+    {
+        // Return zero to indicate invalid input.
+        return 0;
+    }
+
+    // Return one because the email was successfully parsed and validated.
+    return 1;
+}
+
+
+// ============================================================
+// NEXT COMMAND
+// ============================================================
+
+// Display the highest-priority email without removing it from the heap.
+static void displayNextEmail(const MaxHeap *heap)
+{
+    // Get a pointer to the highest-priority email.
+    const Email *email = peekMax(heap);
+
+    // Check whether the heap was empty.
+    if (email == NULL)
+    {
+        // Display the required friendly message when there are no emails.
+        printf("No emails to read.\n\n");
+
+        // Stop processing this command.
+        return;
+    }
+
+    // Display a heading for the next email.
+    printf("Next email:\n");
+
+    // Display the sender category.
+    printf("\tSender: %s\n", email->sender);
+
+    // Display the subject line.
+    printf("\tSubject: %s\n", email->subject);
+
+    // Display the date.
+    printf("\tDate: %s\n\n", email->date);
+}
+
+
+// ============================================================
+// COUNT COMMAND
+// ============================================================
+
+// Display the number of unread emails currently stored in the heap.
+static void displayCount(const MaxHeap *heap)
+{
+    // Print the current heap size, which equals the number of unread emails.
+    if (heap->size == 1)
+    {
+        // Use singular grammar when exactly one email remains.
+        printf("There is 1 email to read.\n\n");
+    }
+    else
+    {
+        // Use plural grammar when zero or multiple emails remain.
+        printf("There are %zu emails to read.\n\n", heap->size);
+    }
+}
+
+
+// ============================================================
+// MAIN PROGRAM
+// ============================================================
+
+// Program execution begins here.
+int main(int argc, char *argv[])
+{
+    // Use standard input by default when no input filename is supplied.
+    FILE *input = stdin;
+
+    // Declare the max heap that will store all unread emails.
+    MaxHeap inbox;
+
+    // Create a buffer large enough to hold one complete input line.
+    char line[LINE_SIZE];
+
+    // Start the arrival-order counter at zero.
+    unsigned long arrival_order = 0;
+
+    // Verify that the program received either zero or one command-line arguments after the executable name.
+    if (argc > 2)
+    {
+        // Display the correct command-line usage when too many arguments are provided.
+        fprintf(stderr, "Usage: %s [test_file]\n", argv[0]);
+
+        // Return a failure status to the operating system.
+        return EXIT_FAILURE;
+    }
+
+    // Check whether the user provided an input filename.
+    if (argc == 2)
+    {
+        // Attempt to open the specified file for reading.
+        input = fopen(argv[1], "r");
+
+        // Check whether the file could be opened.
+        if (input == NULL)
+        {
+            // Report the file-opening error.
+            fprintf(stderr, "Could not open %s\n", argv[1]);
+
+            // Return a failure status.
+            return EXIT_FAILURE;
+        }
+    }
+
+    // Initialize the empty email heap.
+    initializeHeap(&inbox);
+
+    // Read one line at a time until the end of the input is reached.
+    while (fgets(line, sizeof(line), input) != NULL)
+    {
+        // Declare an Email structure that can hold a newly parsed email.
+        Email email;
+
+        // Remove the newline or carriage-return at the end of the input line.
+        removeLineEnding(line);
+
+        // Ignore completely blank lines.
+        if (line[0] == '\0')
+        {
+            // Move to the next input line.
+            continue;
+        }
+
+        // Check whether the command is an EMAIL command.
+        if (strncmp(line, "EMAIL ", 6) == 0)
+        {
+            // Parse and validate the email line.
+            if (!parseEmailLine(line, &email, arrival_order))
+            {
+                // Report that the email command contains invalid data.
+                fprintf(stderr, "Invalid email line.\n");
+
+                // Free all memory allocated for the heap.
+                destroyHeap(&inbox);
+
+                // Close the input file if the program opened one.
+                if (input != stdin)
+                {
+                    // Close the file.
+                    fclose(input);
+                }
+
+                // Return a failure status.
+                return EXIT_FAILURE;
+            }
+
+            // Increment the arrival counter only after a valid email has been parsed.
+            arrival_order++;
+
+            // Insert the valid email into the priority queue.
+            if (!insertEmail(&inbox, email))
+            {
+                // Report that the program could not allocate enough memory.
+                fprintf(stderr, "Not enough memory.\n");
+
+                // Free all memory allocated for the heap.
+                destroyHeap(&inbox);
+
+                // Close the input file if the program opened one.
+                if (input != stdin)
+                {
+                    // Close the file.
+                    fclose(input);
+                }
+
+                // Return a failure status.
+                return EXIT_FAILURE;
+            }
+        }
+
+        // Check whether the command asks for the next email.
+        else if (strcmp(line, "NEXT") == 0)
+        {
+            // Display the highest-priority email without removing it.
+            displayNextEmail(&inbox);
+        }
+
+        // Check whether the command asks to read and remove the highest-priority email.
+        else if (strcmp(line, "READ") == 0)
+        {
+            // Remove the highest-priority email without displaying it.
+            removeMax(&inbox);
+        }
+
+        // Check whether the command asks for the number of unread emails.
+        else if (strcmp(line, "COUNT") == 0)
+        {
+            // Display the current number of unread emails.
+            displayCount(&inbox);
+        }
+
+        // Handle any command that is not recognized.
+        else
+        {
+            // Report the invalid command instead of silently ignoring it.
+            fprintf(stderr, "Unrecognized command: %s\n", line);
+
+            // Continue processing the remaining input rather than terminating the program.
+        }
+    }
+
+    // Free the heap's dynamically allocated memory.
+    destroyHeap(&inbox);
+
+    // Close the input file if a file was opened by the program.
+    if (input != stdin)
+    {
+        // Close the file.
+        fclose(input);
+    }
+
+    // Return success to indicate that the program completed normally.
+    return EXIT_SUCCESS;
+}
